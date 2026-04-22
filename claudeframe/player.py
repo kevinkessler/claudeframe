@@ -127,6 +127,8 @@ class Player:
         self._proc: Optional[subprocess.Popen] = None
         self._client: Optional[MpvClient] = None
         self._eof_event = threading.Event()
+        self._pending_caption: Optional[str] = None
+        self._caption_lock = threading.Lock()
 
     def start(self) -> None:
         # Clean up any stale socket
@@ -190,6 +192,18 @@ class Player:
         ev = msg.get("event")
         if ev == "end-file":
             self._eof_event.set()
+        elif ev == "playback-restart":
+            # Apply the stashed caption the moment mpv shows the new frame —
+            # otherwise updating osd-msg1 right after loadfile beats the image
+            # to the screen by ~1s on this Pi.
+            with self._caption_lock:
+                cap = self._pending_caption
+                self._pending_caption = None
+            if cap is not None and self._client is not None:
+                try:
+                    self._client.set_property("osd-msg1", cap)
+                except Exception:
+                    log.exception("apply caption on playback-restart failed")
 
     def _matte_filter(self) -> str:
         """lavfi graph: blurred auto-fill background + centered fit-to-screen foreground.
@@ -209,20 +223,18 @@ class Player:
         w, h = self.config.display_width, self.config.display_height
         return f"lavfi=[scale={w}:{h}:force_original_aspect_ratio=decrease]"
 
-    def show(self, item, loop: bool) -> None:
-        """Load item and configure loop behavior. Does not block."""
+    def show(self, item, loop: bool, caption: str = "") -> None:
+        """Load item and configure loop behavior. Does not block.
+        The caption is applied when mpv emits playback-restart so it lands on
+        screen together with the new frame."""
         assert self._client is not None
         self._eof_event.clear()
-        # Hide OSD while swapping
-        self._client.set_property("osd-msg1", "")
+        with self._caption_lock:
+            self._pending_caption = caption
         self._client.set_property("loop-file", "inf" if loop else "no")
         vf = self._matte_filter() if item.kind == "image" else self._scale_filter()
         self._client.command("vf", "set", vf)
         self._client.loadfile(item.path, "replace")
-
-    def set_osd(self, text: str) -> None:
-        assert self._client is not None
-        self._client.set_property("osd-msg1", text)
 
     def pause(self, paused: bool) -> None:
         assert self._client is not None

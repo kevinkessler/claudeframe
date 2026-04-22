@@ -141,8 +141,7 @@ class Service:
         log.info("show: kind=%s folder=%s name=%s", item.kind, item.folder, item.display_name)
         caption = self._compose_caption(item)
         try:
-            self.player.show(item, loop=True)   # always loop short videos; image loop is a no-op
-            self.player.set_osd(caption)
+            self.player.show(item, loop=True, caption=caption)
         except Exception:
             log.exception("player.show failed for %s", item.path)
             return
