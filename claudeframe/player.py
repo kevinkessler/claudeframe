@@ -1,0 +1,225 @@
+from __future__ import annotations
+import itertools
+import json
+import logging
+import os
+import socket
+import subprocess
+import threading
+import time
+from queue import Empty, Queue
+from typing import Any, Callable, Dict, List, Optional
+
+log = logging.getLogger(__name__)
+
+
+class MpvClient:
+    """JSON-IPC client for mpv. One writer thread via lock, one reader thread."""
+
+    def __init__(self, socket_path: str):
+        self._path = socket_path
+        self._sock: Optional[socket.socket] = None
+        self._wlock = threading.Lock()
+        self._id_seq = itertools.count(1)
+        self._waiters: Dict[int, Queue] = {}
+        self._waiters_lock = threading.Lock()
+        self._event_listeners: List[Callable[[dict], None]] = []
+        self._reader: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+
+    def connect(self, timeout: float = 20.0) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect(self._path)
+                self._sock = s
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                time.sleep(0.2)
+        if self._sock is None:
+            raise RuntimeError(f"mpv IPC socket never appeared at {self._path}")
+        self._reader = threading.Thread(target=self._read_loop, name="mpv-reader", daemon=True)
+        self._reader.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            if self._sock:
+                self._sock.shutdown(socket.SHUT_RDWR)
+                self._sock.close()
+        except OSError:
+            pass
+
+    def add_event_listener(self, cb: Callable[[dict], None]) -> None:
+        self._event_listeners.append(cb)
+
+    def command(self, *args: Any, timeout: float = 15.0) -> Any:
+        """Send a command; block until mpv responds."""
+        req_id = next(self._id_seq)
+        q: Queue = Queue()
+        with self._waiters_lock:
+            self._waiters[req_id] = q
+        payload = json.dumps({"command": list(args), "request_id": req_id}) + "\n"
+        with self._wlock:
+            assert self._sock is not None
+            self._sock.sendall(payload.encode())
+        try:
+            resp = q.get(timeout=timeout)
+        except Empty:
+            raise TimeoutError(f"mpv did not respond to {args} within {timeout}s")
+        finally:
+            with self._waiters_lock:
+                self._waiters.pop(req_id, None)
+        if resp.get("error") != "success":
+            raise RuntimeError(f"mpv error on {args}: {resp}")
+        return resp.get("data")
+
+    def set_property(self, name: str, value: Any) -> None:
+        self.command("set_property", name, value)
+
+    def loadfile(self, path: str, mode: str = "replace", options: Optional[str] = None) -> None:
+        args = ["loadfile", path, mode]
+        if options:
+            args.append(options)
+        self.command(*args)
+
+    def _read_loop(self) -> None:
+        assert self._sock is not None
+        buf = b""
+        while not self._stop.is_set():
+            try:
+                chunk = self._sock.recv(65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, _, buf = buf.partition(b"\n")
+                if not line.strip():
+                    continue
+                try:
+                    msg = json.loads(line.decode())
+                except json.JSONDecodeError:
+                    log.warning("mpv: unparseable line: %r", line[:200])
+                    continue
+                req_id = msg.get("request_id")
+                if req_id is not None and "error" in msg:
+                    with self._waiters_lock:
+                        q = self._waiters.get(req_id)
+                    if q is not None:
+                        q.put(msg)
+                    continue
+                if "event" in msg:
+                    for cb in list(self._event_listeners):
+                        try:
+                            cb(msg)
+                        except Exception:
+                            log.exception("event listener raised")
+
+
+class Player:
+    """Spawns mpv and drives it via MpvClient."""
+
+    def __init__(self, config):
+        self.config = config
+        self._proc: Optional[subprocess.Popen] = None
+        self._client: Optional[MpvClient] = None
+        self._eof_event = threading.Event()
+
+    def start(self) -> None:
+        # Clean up any stale socket
+        try:
+            os.unlink(self.config.mpv_ipc_socket)
+        except FileNotFoundError:
+            pass
+
+        cmd = [
+            "mpv",
+            "--idle=yes",
+            "--force-window=yes",
+            "--fullscreen=yes",
+            "--keep-open=always",
+            "--no-audio",
+            "--no-input-default-bindings",
+            "--no-input-vo-keyboard",
+            "--cursor-autohide=always",
+            "--osd-level=0",                       # we drive OSD by explicit show-text
+            "--osd-font-size=" + str(self.config.caption_font_size),
+            "--osd-border-size=2",
+            "--osd-color=1.0/1.0/1.0/1.0",
+            "--osd-border-color=0.0/0.0/0.0/1.0",
+            "--osd-align-x=left",
+            "--osd-align-y=bottom",
+            "--osd-margin-x=40",
+            "--osd-margin-y=40",
+            "--image-display-duration=inf",        # we control advance timing
+            "--vo=" + self.config.mpv_vo,
+            "--hwdec=" + self.config.mpv_hwdec,
+            "--loop-file=no",
+            "--input-ipc-server=" + self.config.mpv_ipc_socket,
+            "--msg-level=all=warn",
+        ]
+        if os.path.exists(self.config.caption_font):
+            cmd.append("--osd-font=" + self.config.caption_font)
+
+        env = os.environ.copy()
+        if self.config.mpv_display:
+            env["DISPLAY"] = self.config.mpv_display
+        if self.config.mpv_xauthority:
+            env["XAUTHORITY"] = self.config.mpv_xauthority
+
+        mpv_log = open(self.config.mpv_log_path, "ab", buffering=0) if self.config.mpv_log_path else subprocess.DEVNULL
+        log.info("mpv: starting (DISPLAY=%s): %s", env.get("DISPLAY"), " ".join(cmd))
+        self._proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=mpv_log,
+            stderr=mpv_log,
+            close_fds=True,
+            env=env,
+        )
+        self._client = MpvClient(self.config.mpv_ipc_socket)
+        self._client.connect()
+        self._client.add_event_listener(self._on_event)
+        # Enable end-file observation
+        self._client.command("observe_property", 1, "eof-reached")
+
+    def _on_event(self, msg: dict) -> None:
+        ev = msg.get("event")
+        if ev == "end-file":
+            self._eof_event.set()
+
+    def show(self, item, loop: bool) -> None:
+        """Load item and configure loop behavior. Does not block."""
+        assert self._client is not None
+        self._eof_event.clear()
+        # Hide OSD while swapping
+        self._client.set_property("osd-msg1", "")
+        self._client.set_property("loop-file", "inf" if loop else "no")
+        self._client.loadfile(item.path, "replace")
+
+    def set_osd(self, text: str) -> None:
+        assert self._client is not None
+        self._client.set_property("osd-msg1", text)
+
+    def pause(self, paused: bool) -> None:
+        assert self._client is not None
+        self._client.set_property("pause", paused)
+
+    def stop(self) -> None:
+        if self._client is not None:
+            try:
+                self._client.command("quit")
+            except Exception:
+                pass
+            self._client.close()
+            self._client = None
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+            self._proc = None

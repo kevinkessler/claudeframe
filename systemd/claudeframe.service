@@ -1,0 +1,20 @@
+[Unit]
+Description=claudeframe picture+video slideshow
+After=network-online.target multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m claudeframe --config /home/pi/claudeframe/config/claudeframe.yaml
+WorkingDirectory=/home/pi/claudeframe
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/pi/claudeframe
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/pi/.Xauthority
+Restart=on-failure
+RestartSec=3
+MemoryMax=450M
+Nice=5
+
+[Install]
+WantedBy=default.target

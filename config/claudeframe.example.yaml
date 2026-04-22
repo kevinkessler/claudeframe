@@ -1,0 +1,39 @@
+# claudeframe configuration. Copy to config/claudeframe.yaml and edit as desired.
+# All fields are optional; omitted values use the defaults baked into Config.
+
+pic_dir: "/home/pi/Frame"
+follow_links: true
+deleted_dir: "/home/pi/DeletedPictures"
+ban_list_path: "/home/pi/claudeframe/banned.txt"
+db_path: "/home/pi/claudeframe/index.sqlite"
+
+# Per-slide timing (seconds). Videos longer than this are cut; shorter are looped until this elapses.
+slide_seconds: 20.0
+
+# Fade-to-black duration (milliseconds) inserted between slides. 0 disables fade.
+fade_ms: 400
+
+reshuffle_after_passes: 1
+
+# Caption overlay
+caption_font: "/home/pi/picframe_data/data/fonts/NotoSans-Regular.ttf"
+caption_font_size: 40
+caption_show_filename: true
+caption_show_folder: true
+caption_show_description: true
+
+# Display mode (informational; mpv detects this from DRM)
+display_width: 1680
+display_height: 1050
+
+# mpv options
+mpv_ipc_socket: "/tmp/claudeframe-mpv.sock"
+mpv_log_path: "/tmp/claudeframe-mpv.log"
+mpv_hwdec: "v4l2m2m-copy"   # alt: mmal-copy, mmal, no
+mpv_vo: "gpu"               # "gpu" renders into X; "drm" only works if nothing else owns /dev/dri/card0
+mpv_display: ":0"           # X display to render into (blank to inherit)
+mpv_xauthority: "/home/pi/.Xauthority"
+
+# Web UI (LAN only; no auth)
+web_host: "0.0.0.0"
+web_port: 8080
