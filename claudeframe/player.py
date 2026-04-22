@@ -145,7 +145,7 @@ class Player:
             "--no-input-default-bindings",
             "--no-input-vo-keyboard",
             "--cursor-autohide=always",
-            "--osd-level=0",                       # we drive OSD by explicit show-text
+            "--osd-level=1",                       # osd-msg1 renders at level 1
             "--osd-font-size=" + str(self.config.caption_font_size),
             "--osd-border-size=2",
             "--osd-color=1.0/1.0/1.0/1.0",
@@ -191,6 +191,24 @@ class Player:
         if ev == "end-file":
             self._eof_event.set()
 
+    def _matte_filter(self) -> str:
+        """lavfi graph: blurred auto-fill background + centered fit-to-screen foreground.
+        Also caps output at display size, which avoids the VC4 2048-texture limit."""
+        w, h = self.config.display_width, self.config.display_height
+        sigma = self.config.matte_blur_sigma
+        return (
+            f"lavfi=[split=2[fg][bg];"
+            f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},gblur=sigma={sigma}[bgb];"
+            f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease[fgs];"
+            f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2]"
+        )
+
+    def _scale_filter(self) -> str:
+        """Plain downscale to display size for videos — keeps aspect, stays under
+        the 2048 GL texture limit, no per-frame blur cost."""
+        w, h = self.config.display_width, self.config.display_height
+        return f"lavfi=[scale={w}:{h}:force_original_aspect_ratio=decrease]"
+
     def show(self, item, loop: bool) -> None:
         """Load item and configure loop behavior. Does not block."""
         assert self._client is not None
@@ -198,6 +216,8 @@ class Player:
         # Hide OSD while swapping
         self._client.set_property("osd-msg1", "")
         self._client.set_property("loop-file", "inf" if loop else "no")
+        vf = self._matte_filter() if item.kind == "image" else self._scale_filter()
+        self._client.command("vf", "set", vf)
         self._client.loadfile(item.path, "replace")
 
     def set_osd(self, text: str) -> None:

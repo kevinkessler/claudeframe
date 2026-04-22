@@ -22,9 +22,15 @@ caption_show_filename: true
 caption_show_folder: true
 caption_show_description: true
 
-# Display mode (informational; mpv detects this from DRM)
+# Display size. Used both to cap texture size (VC4 GPU has a 2048 limit, so
+# images larger than that fail to render without this scale) and to build the
+# auto-matte filter. Match this to your actual panel resolution.
 display_width: 1680
 display_height: 1050
+
+# Gaussian blur sigma for the auto-mat background when an image doesn't fill
+# the screen. Larger = softer/more abstract. 0 disables blur but keeps fill.
+matte_blur_sigma: 20
 
 # mpv options
 mpv_ipc_socket: "/tmp/claudeframe-mpv.sock"

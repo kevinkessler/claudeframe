@@ -31,6 +31,7 @@ class Config:
 
     display_width: int = 1680
     display_height: int = 1050
+    matte_blur_sigma: int = 20
 
     mpv_ipc_socket: str = "/tmp/claudeframe-mpv.sock"
     mpv_log_path: str = "/tmp/claudeframe-mpv.log"
