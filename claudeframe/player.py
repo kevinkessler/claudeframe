@@ -78,6 +78,19 @@ class MpvClient:
     def set_property(self, name: str, value: Any) -> None:
         self.command("set_property", name, value)
 
+    def command_async(self, *args: Any) -> None:
+        """Send without waiting for a response. Safe to call from the reader
+        thread (command() would deadlock there, since the reply arrives on the
+        same thread it would be blocking)."""
+        payload = json.dumps({"command": list(args)}) + "\n"
+        with self._wlock:
+            if self._sock is None:
+                return
+            try:
+                self._sock.sendall(payload.encode())
+            except OSError:
+                log.exception("mpv: async send failed")
+
     def loadfile(self, path: str, mode: str = "replace", options: Optional[str] = None) -> None:
         args = ["loadfile", path, mode]
         if options:
@@ -127,6 +140,7 @@ class Player:
         self._proc: Optional[subprocess.Popen] = None
         self._client: Optional[MpvClient] = None
         self._eof_event = threading.Event()
+        self._playing = False  # True between playback-restart and the next show()
         self._pending_caption: Optional[str] = None
         self._caption_lock = threading.Lock()
 
@@ -190,9 +204,21 @@ class Player:
 
     def _on_event(self, msg: dict) -> None:
         ev = msg.get("event")
-        if ev == "end-file":
-            self._eof_event.set()
+        if ev == "property-change" and msg.get("name") == "eof-reached" and msg.get("data") is True:
+            # --keep-open=always suppresses end-file; mpv pauses on the last
+            # frame and flips eof-reached to True. That's our video-finished
+            # signal — but only after playback actually started. Transitions
+            # between slides can also briefly flip it True; ignore those.
+            if self._playing:
+                self._playing = False
+                self._eof_event.set()
         elif ev == "playback-restart":
+            self._playing = True
+            # keep-open=always pauses at EOF; that state survives loadfile-replace,
+            # so force unpause here (after the new file is actually loaded and
+            # playback-restart has fired, which is when the pause sticks).
+            if self._client is not None:
+                self._client.command_async("set_property", "pause", False)
             # Apply the stashed caption the moment mpv shows the new frame —
             # otherwise updating osd-msg1 right after loadfile beats the image
             # to the screen by ~1s on this Pi.
@@ -200,10 +226,9 @@ class Player:
                 cap = self._pending_caption
                 self._pending_caption = None
             if cap is not None and self._client is not None:
-                try:
-                    self._client.set_property("osd-msg1", cap)
-                except Exception:
-                    log.exception("apply caption on playback-restart failed")
+                # Fire-and-forget — we're on the reader thread here, so a
+                # blocking command() would deadlock waiting for its own reply.
+                self._client.command_async("set_property", "osd-msg1", cap)
 
     def _matte_filter(self) -> str:
         """lavfi graph: blurred auto-fill background + centered fit-to-screen foreground.
@@ -223,11 +248,19 @@ class Player:
         w, h = self.config.display_width, self.config.display_height
         return f"lavfi=[scale={w}:{h}:force_original_aspect_ratio=decrease]"
 
+    def wait_eof(self, timeout: float) -> bool:
+        """Block until mpv emits end-file or timeout elapses. Clears the event."""
+        if self._eof_event.wait(timeout):
+            self._eof_event.clear()
+            return True
+        return False
+
     def show(self, item, loop: bool, caption: str = "") -> None:
         """Load item and configure loop behavior. Does not block.
         The caption is applied when mpv emits playback-restart so it lands on
         screen together with the new frame."""
         assert self._client is not None
+        self._playing = False
         self._eof_event.clear()
         with self._caption_lock:
             self._pending_caption = caption

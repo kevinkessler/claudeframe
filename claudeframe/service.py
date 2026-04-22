@@ -107,17 +107,22 @@ class Service:
             line = line + "\n" + item.description if line else item.description
         return line
 
-    def _dwell(self, seconds: float) -> None:
-        """Sleep `seconds`, returning early if _advance is set. Respects pause."""
-        end = time.monotonic() + seconds
+    def _dwell(self, item: MediaItem) -> None:
+        """Dwell on the current item. Images stay for slide_seconds; videos play
+        to eof — and if total elapsed is still under slide_seconds, the video is
+        replayed from the start. Honors pause/advance/rescan/stop."""
+        is_video = item.kind == KIND_VIDEO
+        slide = self.config.slide_seconds
+        start = time.monotonic()
+        last_load = start
         while True:
             if self._stop.is_set():
                 return
             if self._paused.is_set():
-                # while paused, block until resumed (or stopped)
                 while self._paused.is_set() and not self._stop.is_set():
                     time.sleep(0.2)
-                end = time.monotonic() + seconds  # restart dwell on resume
+                start = time.monotonic()   # restart window on resume
+                last_load = start
                 continue
             if self._rescan.is_set():
                 try:
@@ -125,29 +130,49 @@ class Service:
                     self.scheduler.invalidate()
                 finally:
                     self._rescan.clear()
-            remaining = end - time.monotonic()
-            if remaining <= 0:
-                return
-            if self._advance.wait(timeout=min(remaining, 0.25)):
+            if self._advance.is_set():
                 self._advance.clear()
                 return
 
-    def _show_next(self, prev: bool = False) -> None:
+            if is_video:
+                if self.player.wait_eof(timeout=0.25):
+                    now = time.monotonic()
+                    if now - last_load < 0.5:
+                        log.warning("video ended too fast — advancing: %s", item.path)
+                        return
+                    if now - start >= slide:
+                        return
+                    try:
+                        self.player.show(item, loop=False, caption=self._compose_caption(item))
+                    except Exception:
+                        log.exception("video replay failed: %s", item.path)
+                        return
+                    last_load = time.monotonic()
+            else:
+                remaining = (start + slide) - time.monotonic()
+                if remaining <= 0:
+                    return
+                if self._advance.wait(timeout=min(remaining, 0.25)):
+                    self._advance.clear()
+                    return
+
+    def _show_next(self, prev: bool = False) -> Optional[MediaItem]:
         item = self.scheduler.previous() if prev else self.scheduler.next()
         if item is None:
             log.warning("no items to show")
             time.sleep(2.0)
-            return
+            return None
         log.info("show: kind=%s folder=%s name=%s", item.kind, item.folder, item.display_name)
         caption = self._compose_caption(item)
         try:
-            self.player.show(item, loop=True, caption=caption)
+            self.player.show(item, loop=False, caption=caption)
         except Exception:
             log.exception("player.show failed for %s", item.path)
-            return
+            return None
         with self._lock:
             self._current = item
             self._current_ts = time.time()
+        return item
 
     def run(self) -> int:
         log.info("claudeframe starting; pic_dir=%s", self.config.pic_dir)
@@ -175,8 +200,10 @@ class Service:
             while not self._stop.is_set():
                 prev = self._prev_flag.is_set()
                 self._prev_flag.clear()
-                self._show_next(prev=prev)
-                self._dwell(self.config.slide_seconds)
+                item = self._show_next(prev=prev)
+                if item is None:
+                    continue
+                self._dwell(item)
         finally:
             log.info("shutting down")
             self.player.stop()
