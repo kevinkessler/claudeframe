@@ -1,4 +1,4 @@
-PI_HOST ?= pictureframe.lan
+PI_HOST ?= 192.168.132.89
 PI_USER ?= pi
 PI_DEST ?= /home/pi/claudeframe
 SSH := ssh $(PI_USER)@$(PI_HOST)

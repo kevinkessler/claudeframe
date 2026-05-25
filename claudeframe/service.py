@@ -133,6 +133,16 @@ class Service:
             if self._advance.is_set():
                 self._advance.clear()
                 return
+            if not self.player.is_alive():
+                # mpv died (e.g. crashed on a malformed file). The reader thread
+                # has exited, so eof-reached can never fire — without this check
+                # the dwell loop would poll wait_eof() forever.
+                log.warning("mpv subprocess died while showing %s; restarting", item.path)
+                try:
+                    self.player.restart()
+                except Exception:
+                    log.exception("player.restart failed")
+                return
 
             if is_video:
                 if self.player.wait_eof(timeout=0.25):
@@ -168,6 +178,15 @@ class Service:
             self.player.show(item, loop=False, caption=caption)
         except Exception:
             log.exception("player.show failed for %s", item.path)
+            if not self.player.is_alive():
+                log.warning("mpv is dead; restarting player")
+                try:
+                    self.player.restart()
+                except Exception:
+                    log.exception("player.restart failed; backing off")
+                    time.sleep(5.0)
+            else:
+                time.sleep(1.0)
             return None
         with self._lock:
             self._current = item

@@ -273,6 +273,25 @@ class Player:
         assert self._client is not None
         self._client.set_property("pause", paused)
 
+    def is_alive(self) -> bool:
+        """True iff the mpv subprocess is still running. Side effect: reaps
+        the zombie if mpv has exited, so the kernel doesn't leak a defunct
+        entry across the rest of the session."""
+        if self._proc is None:
+            return False
+        return self._proc.poll() is None
+
+    def restart(self) -> None:
+        """Tear down a dead/wedged mpv and spawn a fresh one. Used by the
+        service when is_alive() goes False mid-slideshow (e.g. mpv segfaults
+        on a malformed video)."""
+        self.stop()
+        self._eof_event.clear()
+        self._playing = False
+        with self._caption_lock:
+            self._pending_caption = None
+        self.start()
+
     def stop(self) -> None:
         if self._client is not None:
             try:
