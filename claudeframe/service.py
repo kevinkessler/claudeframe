@@ -13,7 +13,6 @@ from claudeframe.indexer import Indexer, MediaItem, KIND_VIDEO
 from claudeframe.player import Player
 from claudeframe.scheduler import Scheduler
 from claudeframe.watcher import Watcher
-from claudeframe.webui import build_app
 
 log = logging.getLogger(__name__)
 
@@ -115,6 +114,8 @@ class Service:
         slide = self.config.slide_seconds
         start = time.monotonic()
         last_load = start
+        last_pos = -1.0           # last observed time-pos (video stall watchdog)
+        last_progress = start     # when time-pos last advanced
         while True:
             if self._stop.is_set():
                 return
@@ -123,6 +124,8 @@ class Service:
                     time.sleep(0.2)
                 start = time.monotonic()   # restart window on resume
                 last_load = start
+                last_progress = start      # don't count paused time as a stall
+                last_pos = -1.0
                 continue
             if self._rescan.is_set():
                 try:
@@ -145,6 +148,18 @@ class Service:
                 return
 
             if is_video:
+                # Watchdog: a video that won't open or stalls mid-stream never
+                # reaches EOF, so wait_eof() below would block forever. Skip it
+                # if time-pos hasn't advanced for video_stall_timeout seconds.
+                pos = self.player.time_pos()
+                now = time.monotonic()
+                if pos is not None and pos > last_pos + 0.01:
+                    last_pos = pos
+                    last_progress = now
+                elif now - last_progress >= self.config.video_stall_timeout:
+                    log.warning("video made no progress for %.0fs — skipping: %s",
+                                self.config.video_stall_timeout, item.path)
+                    return
                 if self.player.wait_eof(timeout=0.25):
                     now = time.monotonic()
                     if now - last_load < 0.5:
@@ -158,6 +173,8 @@ class Service:
                         log.exception("video replay failed: %s", item.path)
                         return
                     last_load = time.monotonic()
+                    last_progress = last_load   # fresh window for the replay
+                    last_pos = -1.0
             else:
                 remaining = (start + slide) - time.monotonic()
                 if remaining <= 0:
@@ -199,7 +216,9 @@ class Service:
         self.watcher.start()
         self.player.start()
 
-        # Flask in a thread
+        # Flask in a thread (imported here so the slideshow core stays usable
+        # without the web stack installed)
+        from claudeframe.webui import build_app
         app = build_app(self)
         web_thread = threading.Thread(
             target=lambda: app.run(

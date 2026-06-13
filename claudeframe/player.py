@@ -255,6 +255,18 @@ class Player:
             return True
         return False
 
+    def time_pos(self) -> Optional[float]:
+        """Current playback position in seconds, or None when mpv has no file
+        loaded / isn't reporting yet (e.g. a video that failed to open or is
+        stalled mid-stream). Short timeout so a wedged mpv can't block the
+        caller. Used by the dwell watchdog to detect a stalled video."""
+        if self._client is None:
+            return None
+        try:
+            return self._client.command("get_property", "time-pos", timeout=2.0)
+        except (TimeoutError, RuntimeError):
+            return None
+
     def show(self, item, loop: bool, caption: str = "") -> None:
         """Load item and configure loop behavior. Does not block.
         The caption is applied when mpv emits playback-restart so it lands on

@@ -20,6 +20,10 @@ class Config:
     db_path: str = "/home/pi/claudeframe/index.sqlite"
 
     slide_seconds: float = 20.0
+    # Skip a video that makes no playback progress (time-pos not advancing) for
+    # this many seconds — covers a file that won't open or stalls mid-stream on
+    # a slow share, which would otherwise never reach EOF and hang the slideshow.
+    video_stall_timeout: float = 10.0
     fade_ms: int = 400
     reshuffle_after_passes: int = 1
 
