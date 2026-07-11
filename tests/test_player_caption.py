@@ -37,7 +37,12 @@ def test_filter_restart_does_not_consume_next_caption():
     assert player._pending_caption == "next caption"
     assert client.loaded == [(item.path, "replace")]
 
+    # Another playback restart still must not consume it; only loading the
+    # requested media establishes which caption belongs on screen.
     player._on_event({"event": "playback-restart"})
+    assert player._pending_caption == "next caption"
+
+    player._on_event({"event": "file-loaded"})
 
     assert player._pending_caption is None
     assert ("set_property", "osd-msg1", "next caption") in client.async_commands

@@ -215,16 +215,11 @@ class Player:
             if self._playing:
                 self._playing = False
                 self._eof_event.set()
-        elif ev == "playback-restart":
-            self._playing = True
-            # keep-open=always pauses at EOF; that state survives loadfile-replace,
-            # so force unpause here (after the new file is actually loaded and
-            # playback-restart has fired, which is when the pause sticks).
-            if self._client is not None:
-                self._client.command_async("set_property", "pause", False)
-            # Apply the stashed caption the moment mpv shows the new frame —
-            # otherwise updating osd-msg1 right after loadfile beats the image
-            # to the screen by ~1s on this Pi.
+        elif ev == "file-loaded":
+            # Unlike playback-restart, file-loaded is emitted only for a new
+            # media file. Filter changes can restart playback of the outgoing
+            # file, so consuming the pending caption on playback-restart races
+            # and can leave the caption one slide ahead or behind.
             with self._caption_lock:
                 cap = self._pending_caption
                 self._pending_caption = None
@@ -232,6 +227,13 @@ class Player:
                 # Fire-and-forget — we're on the reader thread here, so a
                 # blocking command() would deadlock waiting for its own reply.
                 self._client.command_async("set_property", "osd-msg1", cap)
+        elif ev == "playback-restart":
+            self._playing = True
+            # keep-open=always pauses at EOF; that state survives loadfile-replace,
+            # so force unpause here (after the new file is actually loaded and
+            # playback-restart has fired, which is when the pause sticks).
+            if self._client is not None:
+                self._client.command_async("set_property", "pause", False)
 
     def _matte_filter(self) -> str:
         """lavfi graph: blurred auto-fill background + centered fit-to-screen foreground.
