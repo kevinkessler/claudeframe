@@ -157,6 +157,12 @@ is denied because lightdm owns DRM master).
 8. **Disable mpv's OSC for unattended display.** `Player.start()` passes
    `--no-osc`; disabling default key bindings alone does not suppress the
    playback controls that appear when the pointer is near the bottom edge.
+9. **Arm captions after changing the video filter.** The synchronous `vf set`
+   in `Player.show()` can emit `playback-restart` for the outgoing file. If the
+   next caption is stashed before that command, the outgoing event consumes it
+   and captions lag one slide behind. Set `_pending_caption` only after `vf set`
+   completes and immediately before `loadfile`. Regression coverage is in
+   `tests/test_player_caption.py`.
 
 ## Known failure modes and their defenses
 

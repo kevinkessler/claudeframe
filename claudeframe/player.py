@@ -277,11 +277,14 @@ class Player:
         assert self._client is not None
         self._playing = False
         self._eof_event.clear()
-        with self._caption_lock:
-            self._pending_caption = caption
         self._client.set_property("loop-file", "inf" if loop else "no")
         vf = self._matte_filter() if item.kind == "image" else self._scale_filter()
         self._client.command("vf", "set", vf)
+        # Changing vf can itself emit playback-restart for the current file.
+        # Arm the caption only after that command completes, otherwise the
+        # current file can consume the next file's caption before loadfile.
+        with self._caption_lock:
+            self._pending_caption = caption
         self._client.loadfile(item.path, "replace")
 
     def pause(self, paused: bool) -> None:
