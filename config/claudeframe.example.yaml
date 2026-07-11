@@ -37,6 +37,7 @@ mpv_ipc_socket: "/tmp/claudeframe-mpv.sock"
 mpv_log_path: "/tmp/claudeframe-mpv.log"
 mpv_hwdec: "v4l2m2m-copy"   # alt: mmal-copy, mmal, no
 mpv_vo: "gpu"               # "gpu" renders into X; "drm" only works if nothing else owns /dev/dri/card0
+mpv_gpu_api: ""             # Pi 4 at 4K: use "opengl" if Vulkan swapchain allocation fails
 mpv_display: ":0"           # X display to render into (blank to inherit)
 mpv_xauthority: "/home/pi/.Xauthority"
 

@@ -158,6 +158,7 @@ class Player:
             "--fullscreen=yes",
             "--keep-open=always",
             "--no-audio",
+            "--no-osc",
             "--no-input-default-bindings",
             "--no-input-vo-keyboard",
             "--cursor-autohide=always",
@@ -177,6 +178,8 @@ class Player:
             "--input-ipc-server=" + self.config.mpv_ipc_socket,
             "--msg-level=all=warn",
         ]
+        if self.config.mpv_gpu_api:
+            cmd.append("--gpu-api=" + self.config.mpv_gpu_api)
         if os.path.exists(self.config.caption_font):
             cmd.append("--osd-font=" + self.config.caption_font)
 

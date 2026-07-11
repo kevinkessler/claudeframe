@@ -41,6 +41,10 @@ class Config:
     mpv_log_path: str = "/tmp/claudeframe-mpv.log"
     mpv_hwdec: str = "v4l2m2m-copy"
     mpv_vo: str = "gpu"
+    # Optional GPU API override. Pi 4 systems using mpv/libplacebo may select
+    # Vulkan automatically, which can fail to allocate a 4K swapchain; use
+    # "opengl" there. Blank preserves mpv's automatic selection.
+    mpv_gpu_api: str = ""
     # X11 env passed to the mpv subprocess. Leave blank to inherit from the
     # parent process. Required on this Pi because lightdm owns DRM master, so
     # mpv renders into the X session rather than talking to /dev/dri directly.

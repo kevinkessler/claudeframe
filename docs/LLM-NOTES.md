@@ -29,7 +29,7 @@ No external Python deps beyond distro packages: `flask`, `yaml`, `pyinotify`,
 - **SSH: `pi@192.168.132.89` — always use the IP.** mDNS/DNS for
   `pictureframe.lan` / `pictureframe.local` is unreliable on this network.
 
-### Planned rebuild (researched 2026-07, not yet built)
+### Pi 4 rebuild design notes (researched 2026-07)
 
 - Raspberry Pi 4 + NV156QUM 15.6" 4K (3840×2160) panel
 - LCD controller: VS-RT2795T4K-V1 (HDMI/mini-DP in, 30-pin eDP out, needs
@@ -42,6 +42,21 @@ No external Python deps beyond distro packages: `flask`, `yaml`, `pyinotify`,
 - When rebuilding: `display_width`/`display_height` in config must change to
   3840×2160, and the VC4 2048-texture-limit workaround (see mpv section) may
   behave differently on the Pi 4's GPU — retest large images.
+
+### Pi 4 frame installed 2026-07-11
+
+- SSH: `kevin@192.168.40.99`
+- Debian 13 (trixie), arm64; desktop/Xwayland display `:0` currently reports
+  4096×2160.
+- App: `/home/kevin/claudeframe`; user service enabled as
+  `claudeframe.service`; web UI at `http://192.168.40.99:8080/`.
+- NAS is mounted at `/home/kevin/Pictures`. The slideshow root is
+  `/home/kevin/Frame`, containing the 120 selection symlinks copied from the
+  production frame with targets rewritten from `/home/pi/Pictures/...` to
+  `/home/kevin/Pictures/...`. Do not confuse it with the real NAS directory
+  `/home/kevin/Pictures/Frame`.
+- Live config uses `display_width: 4096`, `display_height: 2160`,
+  `mpv_hwdec: auto-safe`, and `mpv_gpu_api: opengl`.
 
 ## Storage layout (critical context)
 
@@ -133,6 +148,15 @@ is denied because lightdm owns DRM master).
    render unless scaled down first — that's what `display_width`/`display_height`
    and the scale filter are for. Also drives the blurred auto-matte for images
    that don't fill the screen (`matte_blur_sigma`).
+7. **Pi 4 at 4K must force OpenGL on the current Debian 13/mpv stack.** mpv's
+   automatic GPU selection chose Vulkan, then repeatedly logged
+   `VK_ERROR_OUT_OF_HOST_MEMORY` while recreating the swapchain. The scheduler
+   continued advancing but the panel remained stuck on its first image. Set
+   `mpv_gpu_api: opengl` in the Pi's live config. The default remains blank so
+   existing installations retain mpv's automatic selection.
+8. **Disable mpv's OSC for unattended display.** `Player.start()` passes
+   `--no-osc`; disabling default key bindings alone does not suppress the
+   playback controls that appear when the pointer is near the bottom edge.
 
 ## Known failure modes and their defenses
 
