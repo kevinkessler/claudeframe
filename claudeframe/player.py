@@ -143,6 +143,15 @@ class Player:
         self._playing = False  # True between playback-restart and the next show()
         self._pending_caption: Optional[str] = None
         self._caption_lock = threading.Lock()
+        self._rendered_event = threading.Event()
+        self._render_lock = threading.Lock()
+        self._render_generation = 0
+        self._client_generation = 0
+        self._pending_render_generation: Optional[int] = None
+        self._loaded_render_generation: Optional[int] = None
+        self._rendered_generation: Optional[int] = None
+        self._mail_overlay_lock = threading.Lock()
+        self._mail_overlay_generation = 0
 
     def start(self) -> None:
         # Clean up any stale socket
@@ -199,41 +208,68 @@ class Player:
             close_fds=True,
             env=env,
         )
-        self._client = MpvClient(self.config.mpv_ipc_socket)
-        self._client.connect()
-        self._client.add_event_listener(self._on_event)
+        client = MpvClient(self.config.mpv_ipc_socket)
+        client.connect()
+        self._client = client
+        with self._render_lock:
+            self._client_generation += 1
+            client_generation = self._client_generation
+        client.add_event_listener(
+            lambda msg, origin=client, generation=client_generation: self._on_event(
+                msg,
+                client_generation=generation,
+                client=origin,
+            )
+        )
         # Enable end-file observation
-        self._client.command("observe_property", 1, "eof-reached")
+        client.command("observe_property", 1, "eof-reached")
 
-    def _on_event(self, msg: dict) -> None:
+    def _on_event(
+        self,
+        msg: dict,
+        client_generation: Optional[int] = None,
+        client: Optional[MpvClient] = None,
+    ) -> None:
+        origin = client if client is not None else self._client
         ev = msg.get("event")
-        if ev == "property-change" and msg.get("name") == "eof-reached" and msg.get("data") is True:
-            # --keep-open=always suppresses end-file; mpv pauses on the last
-            # frame and flips eof-reached to True. That's our video-finished
-            # signal — but only after playback actually started. Transitions
-            # between slides can also briefly flip it True; ignore those.
-            if self._playing:
-                self._playing = False
-                self._eof_event.set()
-        elif ev == "file-loaded":
-            # Unlike playback-restart, file-loaded is emitted only for a new
-            # media file. Filter changes can restart playback of the outgoing
-            # file, so consuming the pending caption on playback-restart races
-            # and can leave the caption one slide ahead or behind.
-            with self._caption_lock:
-                cap = self._pending_caption
-                self._pending_caption = None
-            if cap is not None and self._client is not None:
-                # Fire-and-forget — we're on the reader thread here, so a
-                # blocking command() would deadlock waiting for its own reply.
-                self._client.command_async("set_property", "osd-msg1", cap)
-        elif ev == "playback-restart":
-            self._playing = True
-            # keep-open=always pauses at EOF; that state survives loadfile-replace,
-            # so force unpause here (after the new file is actually loaded and
-            # playback-restart has fired, which is when the pause sticks).
-            if self._client is not None:
-                self._client.command_async("set_property", "pause", False)
+        with self._render_lock:
+            # Keep validation and mutation atomic. Otherwise an old reader can
+            # pass this check, race with restart(), then acknowledge a new load.
+            if client_generation is not None and (
+                client_generation != self._client_generation or origin is not self._client
+            ):
+                return
+            if ev == "property-change" and msg.get("name") == "eof-reached" and msg.get("data") is True:
+                # --keep-open=always suppresses end-file; mpv pauses on the last
+                # frame and flips eof-reached to True. That's our video-finished
+                # signal — but only after playback actually started. Transitions
+                # between slides can also briefly flip it True; ignore those.
+                if self._playing:
+                    self._playing = False
+                    self._eof_event.set()
+            elif ev == "file-loaded":
+                # Unlike playback-restart, file-loaded is emitted only for a new
+                # media file. It identifies the requested load, but the first
+                # playback-restart after it is the render-commit acknowledgement.
+                self._loaded_render_generation = self._pending_render_generation
+                with self._caption_lock:
+                    cap = self._pending_caption
+                    self._pending_caption = None
+                if cap is not None and origin is not None:
+                    # Fire-and-forget — we're on the reader thread here, so a
+                    # blocking command() would deadlock waiting for its own reply.
+                    origin.command_async("set_property", "osd-msg1", cap)
+            elif ev == "playback-restart":
+                self._playing = True
+                generation = self._loaded_render_generation
+                if generation is not None and generation == self._pending_render_generation:
+                    self._rendered_generation = generation
+                    self._loaded_render_generation = None
+                    self._rendered_event.set()
+                # keep-open=always pauses at EOF; that state survives
+                # loadfile-replace, so force unpause after the new file starts.
+                if origin is not None:
+                    origin.command_async("set_property", "pause", False)
 
     def _matte_filter(self) -> str:
         """lavfi graph: blurred auto-fill background + centered fit-to-screen foreground.
@@ -272,22 +308,87 @@ class Player:
         except (TimeoutError, RuntimeError):
             return None
 
-    def show(self, item, loop: bool, caption: str = "") -> None:
-        """Load item and configure loop behavior. Does not block.
-        The caption is applied when mpv emits playback-restart so it lands on
-        screen together with the new frame."""
+    def show(self, item, loop: bool, caption: str = "") -> int:
+        """Request a media load and return its render-acknowledgement token."""
         assert self._client is not None
         self._playing = False
         self._eof_event.clear()
         self._client.set_property("loop-file", "inf" if loop else "no")
         vf = self._matte_filter() if item.kind == "image" else self._scale_filter()
         self._client.command("vf", "set", vf)
+        self._playing = False  # discard an outgoing-file filter restart
         # Changing vf can itself emit playback-restart for the current file.
-        # Arm the caption only after that command completes, otherwise the
-        # current file can consume the next file's caption before loadfile.
+        # Arm caption/render state only after that command completes, otherwise
+        # an outgoing-file restart can acknowledge the requested file.
+        with self._render_lock:
+            self._render_generation += 1
+            generation = self._render_generation
+            self._pending_render_generation = generation
+            self._loaded_render_generation = None
+            self._rendered_generation = None
+            self._rendered_event.clear()
         with self._caption_lock:
             self._pending_caption = caption
         self._client.loadfile(item.path, "replace")
+        return generation
+
+    def wait_rendered(
+        self,
+        timeout: float,
+        generation: Optional[int] = None,
+        stop_event: Optional[threading.Event] = None,
+    ) -> bool:
+        """Wait boundedly for a specific load's first playback restart."""
+        if generation is None:
+            with self._render_lock:
+                generation = self._pending_render_generation
+        deadline = time.monotonic() + timeout
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            self._rendered_event.wait(min(remaining, 0.1))
+            with self._render_lock:
+                if self._rendered_generation == generation:
+                    return True
+                self._rendered_event.clear()
+
+    def show_mail_icon(self, duration: float = 2.0) -> None:
+        """Show an independent top-right envelope without disturbing captions."""
+        width = self.config.display_width
+        height = self.config.display_height
+        overlay = f"{{\\an9\\pos({width - 48},48)\\fs96\\bord4\\shad0}}✉"
+        try:
+            with self._mail_overlay_lock:
+                self._mail_overlay_generation += 1
+                generation = self._mail_overlay_generation
+                client = self._client
+                if client is None:
+                    return
+                # Keep the generation update and send in one critical section:
+                # an older hide can run either before this refresh or not at all.
+                client.command_async(
+                    "osd-overlay", 7719, "ass-events", overlay, width, height, 100
+                )
+            timer = threading.Timer(duration, self._hide_mail_icon, args=(generation,))
+            timer.daemon = True
+            timer.start()
+        except Exception:
+            log.exception("mail overlay creation failed")
+
+    def _hide_mail_icon(self, generation: int) -> None:
+        try:
+            with self._mail_overlay_lock:
+                if generation != self._mail_overlay_generation:
+                    return
+                client = self._client
+                if client is None:
+                    return
+                client.command_async("osd-overlay", 7719, "none", "")
+        except Exception:
+            log.exception("mail overlay removal failed")
 
     def pause(self, paused: bool) -> None:
         assert self._client is not None
@@ -307,15 +408,26 @@ class Player:
         on a malformed video)."""
         self.stop()
         self._eof_event.clear()
+        self._rendered_event.clear()
         self._playing = False
+        with self._render_lock:
+            self._pending_render_generation = None
+            self._loaded_render_generation = None
+            self._rendered_generation = None
         with self._caption_lock:
             self._pending_caption = None
         self.start()
 
     def stop(self) -> None:
+        with self._mail_overlay_lock:
+            self._mail_overlay_generation += 1
+        with self._render_lock:
+            # Invalidate callbacks from a closing IPC reader before a restart
+            # can arm another load on a new client.
+            self._client_generation += 1
         if self._client is not None:
             try:
-                self._client.command("quit")
+                self._client.command("quit", timeout=1.0)
             except Exception:
                 pass
             self._client.close()

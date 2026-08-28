@@ -7,8 +7,10 @@ a fake Player so they run without a real mpv subprocess.
 from __future__ import annotations
 import threading
 import time
+from queue import Queue
 
 from claudeframe.config import Config
+from claudeframe.history import DisplayHistory
 from claudeframe.indexer import MediaItem, KIND_VIDEO
 from claudeframe.service import Service
 
@@ -49,6 +51,8 @@ def _make_service(player, stall_timeout: float) -> Service:
     svc._paused = threading.Event()
     svc._rescan = threading.Event()
     svc._advance = threading.Event()
+    svc._controls = Queue(maxsize=32)
+    svc.history = DisplayHistory()
     return svc
 
 
@@ -89,6 +93,6 @@ def test_progressing_video_is_not_skipped():
     t = _run_dwell(svc)
     time.sleep(0.6)   # 3x the stall timeout
     assert t.is_alive(), "watchdog wrongly skipped a progressing video"
-    svc._advance.set()
+    svc.request_next()
     t.join(timeout=2.0)
     assert not t.is_alive(), "_dwell did not honor advance"

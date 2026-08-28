@@ -20,6 +20,8 @@ class Config:
     db_path: str = "/home/pi/claudeframe/index.sqlite"
 
     slide_seconds: float = 20.0
+    # Maximum wait for mpv to acknowledge that a requested file rendered.
+    render_timeout: float = 20.0
     # Skip a video that makes no playback progress (time-pos not advancing) for
     # this many seconds — covers a file that won't open or stalls mid-stream on
     # a slow share, which would otherwise never reach EOF and hang the slideshow.
@@ -53,6 +55,9 @@ class Config:
 
     web_host: str = "0.0.0.0"
     web_port: int = 8080
+
+    # Physical GPIO controls are frame-specific and opt in explicitly.
+    buttons_enabled: bool = False
 
     image_exts: List[str] = field(default_factory=lambda: sorted(IMAGE_EXTS))
     video_exts: List[str] = field(default_factory=lambda: sorted(VIDEO_EXTS))

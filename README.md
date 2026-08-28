@@ -6,8 +6,9 @@ Replacement for [picframe](https://github.com/helgeerbe/picframe) that adds vide
 
 ## Target hardware
 
-- Raspberry Pi 3 Model B (1 GB RAM), Raspbian Buster
-- HDMI display (tested at 1680×1050)
+- Raspberry Pi 3 Model B (1 GB RAM), Raspbian Buster (original frame)
+- Raspberry Pi 4, Debian 13 (button-equipped frame)
+- HDMI display (tested at 1680×1050 and 4096×2160)
 - Fake-KMS (`dtoverlay=vc4-fkms-v3d`) enabled for DRM/KMS output
 - Source tree of photos/videos under `/home/pi/Frame/` (typically symlinks into a CIFS-mounted NAS)
 
@@ -30,15 +31,19 @@ For each slide:
 
 ```bash
 sudo apt-get install mpv libimage-exiftool-perl \
-    python3-flask python3-yaml python3-pyinotify python3-pil
+    python3-flask python3-yaml python3-pyinotify python3-pil \
+    python3-gpiozero python3-requests
 ```
 
 Deploy from dev machine:
 
 ```bash
-make deploy          # rsync to /home/pi/claudeframe
-make enable start    # install + start user systemd unit
-make tail            # follow logs
+make deploy          # original frame: rsync to /home/pi/claudeframe
+make enable start    # install + start original user systemd unit
+make tail            # follow original-frame logs
+
+make deploy-frame2 restart-frame2  # Pi 4 frame at kevin@192.168.40.99
+make logs-frame2                    # inspect Pi 4 service logs
 ```
 
 ## Configuration
@@ -47,9 +52,20 @@ make tail            # follow logs
 
 Inherits defaults where sensible from the existing `~/picframe_data/config/configuration.yaml`.
 
+## Physical controls (Pi 4 frame)
+
+BCM GPIO22 goes to Previous, GPIO27 flags the displayed picture for review, and
+GPIO17 goes to Next. All switches use pull-ups and a shared ground. Physical
+buttons default off so the original frame remains unchanged; set
+`buttons_enabled: true` only in the Pi 4 frame's live `claudeframe.yaml`. The
+private Home Assistant endpoint is loaded only from
+`PICTURE_FRAME_HA_WEBHOOK_URL` in the frame's systemd environment file.
+
 ## Web UI
 
-Open `http://pictureframe.lan:8080/` on your LAN. No auth. Pause/resume, next/prev, ban current, rescan.
+Open the frame's port 8080 on your LAN. No auth. Pause/resume, next/prev, ban
+current, rescan. Next/Previous use the same committed display history as the
+physical buttons.
 
 ## Rollback
 

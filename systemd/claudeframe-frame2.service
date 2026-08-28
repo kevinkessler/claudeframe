@@ -1,0 +1,21 @@
+[Unit]
+Description=claudeframe picture+video slideshow (Pi 4 frame)
+After=network-online.target graphical-session.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m claudeframe --config /home/kevin/claudeframe/config/claudeframe.yaml
+WorkingDirectory=/home/kevin/claudeframe
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/kevin/claudeframe
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/kevin/.Xauthority
+EnvironmentFile=-/home/kevin/.config/claudeframe/environment
+Restart=on-failure
+RestartSec=3
+MemoryMax=900M
+Nice=5
+
+[Install]
+WantedBy=default.target
