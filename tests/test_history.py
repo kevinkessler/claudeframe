@@ -62,3 +62,18 @@ def test_duplicate_paths_remain_distinct_display_events():
     history.commit_back()
     assert history.current() == "same.jpg"
     assert history.cursor == 0
+
+
+def test_jump_discards_forward_history_and_appends():
+    history = DisplayHistory(max_entries=11)
+    for value in "abc":
+        history.commit_new(value)
+    history.commit_back()
+    history.commit_back()
+
+    history.commit_jump("x")
+
+    assert history.items() == ["a", "x"]
+    assert history.current() == "x"
+    assert history.forward_candidate() is None
+    assert history.back_candidate() == "a"

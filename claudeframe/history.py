@@ -55,6 +55,11 @@ class DisplayHistory(Generic[T]):
             del self._items[:len(self._items) - self._max_entries]
         self._cursor = len(self._items) - 1
 
+    def commit_jump(self, item: T) -> None:
+        """Commit an explicitly chosen item, discarding forward history like a browser link."""
+        del self._items[self._cursor + 1:]
+        self.commit_new(item)
+
     def remove_where(self, predicate: Callable[[T], bool]) -> None:
         """Remove invalid entries while preserving the cursor's relative place."""
         kept: List[T] = []

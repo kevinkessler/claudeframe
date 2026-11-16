@@ -16,6 +16,7 @@ from claudeframe.indexer import Indexer, MediaItem, KIND_VIDEO
 from claudeframe.notifier import FlagJob, NotificationWorker, local_timestamp
 from claudeframe.player import Player
 from claudeframe.scheduler import Scheduler
+from claudeframe import transcode
 from claudeframe.watcher import Watcher
 
 log = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ CONTROL_NEXT = "next"
 CONTROL_PREVIOUS = "previous"
 CONTROL_FLAG = "flag"
 CONTROL_BAN = "ban"
+CONTROL_SHOW = "show"
 CONTROL_STOP = "stop"
 
 
@@ -46,6 +48,7 @@ class Service:
 
         self._current: Optional[MediaItem] = None
         self._current_ts: float = 0.0
+        self._selected: Optional[MediaItem] = None  # web UI pick awaiting display
         self._paused = threading.Event()
         self._advance = threading.Event()   # wakes the slide-dwell wait for queued controls
         self._controls: Queue[str] = Queue(maxsize=32)
@@ -55,6 +58,9 @@ class Service:
         self._notifier_available = False
         self._buttons_started = False
         self._dwell_deadline: Optional[float] = None
+        # Video path -> whether it plays via zero-copy output. Probed once per
+        # path (ffprobe over the NAS isn't free); failed conversions stay False.
+        self._video_zero_copy: dict[str, bool] = {}
 
     # ---- control surface (used by web UI) ----
 
@@ -91,6 +97,16 @@ class Service:
 
     def ban_current(self) -> None:
         self._enqueue_control(CONTROL_BAN)
+
+    def request_show(self, item: MediaItem) -> None:
+        """Display `item` now; the slideshow continues from it afterwards."""
+        with self._lock:
+            self._selected = item  # latest pick wins if several arrive at once
+        # A paused dwell does not service controls, and mpv unpauses on every
+        # new file anyway, so a pick resumes the slideshow.
+        if self._paused.is_set():
+            self.resume()
+        self._enqueue_control(CONTROL_SHOW)
 
     def request_rescan(self) -> None:
         self._rescan.set()
@@ -183,6 +199,10 @@ class Service:
             if control == CONTROL_PREVIOUS and self.history.back_candidate() is None:
                 log.debug("previous ignored at oldest retained display")
                 continue
+            if control == CONTROL_SHOW:
+                with self._lock:
+                    if self._selected is None:
+                        continue  # an earlier SHOW already displayed the latest pick
             return control
 
     def _start_buttons(self) -> None:
@@ -278,6 +298,34 @@ class Service:
                     return CONTROL_NEXT
                 self._advance.wait(timeout=min(remaining, 0.25))
 
+    def _prepare_video(self, item: MediaItem) -> MediaItem:
+        """Convert a video the hardware can't decode (if enabled) and record
+        whether it can use zero-copy output. Returns the item to show."""
+        if item.path in self._video_zero_copy:
+            return item
+        info = transcode.probe(item.path)
+        if (info is not None and not transcode.hw_decodable(info)
+                and self.config.transcode_videos and self.config.deleted_dir):
+            log.info("transcode: converting %s (%s %dx%d %s)",
+                     item.path, info.codec, info.width, info.height, info.pix_fmt)
+            t0 = time.monotonic()
+            try:
+                new_path = transcode.convert(item.path, info, self.config.pic_dir, self.config.deleted_dir)
+                self.indexer.remove_path(item.path)
+                converted = self.indexer.add_path(new_path)
+                if converted is None:
+                    raise RuntimeError(f"indexer rejected {new_path}")
+            except Exception:
+                log.exception("transcode failed for %s; playing original", item.path)
+            else:
+                log.info("transcode: wrote %s in %.0fs; original moved to %s",
+                         new_path, time.monotonic() - t0, self.config.deleted_dir)
+                item, info = converted, transcode.probe(new_path)
+        self._video_zero_copy[item.path] = bool(
+            self.config.mpv_wayland_display and info is not None and transcode.hw_decodable(info)
+        )
+        return item
+
     def _wait_for_render(self, generation: Optional[int]) -> bool:
         return self.player.wait_rendered(
             self.config.render_timeout,
@@ -304,6 +352,7 @@ class Service:
                 committed,
                 loop=False,
                 caption=self._compose_caption(committed),
+                zero_copy=self._video_zero_copy.get(committed.path, False),
             )
             if not self._wait_for_render(generation):
                 log.warning("could not restore committed picture after player restart: %s", committed.path)
@@ -325,6 +374,7 @@ class Service:
                 item,
                 loop=False,
                 caption=self._compose_caption(item),
+                zero_copy=self._video_zero_copy.get(item.path, False),
             )
             if self._wait_for_render(generation):
                 return True
@@ -341,6 +391,10 @@ class Service:
         if control == CONTROL_PREVIOUS:
             item = self.history.back_candidate()
             commit = "back"
+        elif control == CONTROL_SHOW:
+            with self._lock:
+                item, self._selected = self._selected, None
+            commit = "jump"
         else:
             item = self.history.forward_candidate()
             if item is not None:
@@ -348,10 +402,12 @@ class Service:
             else:
                 item = self.scheduler.next()
         if item is None:
-            if control != CONTROL_PREVIOUS:
+            if control == CONTROL_NEXT:
                 log.warning("no items to show")
                 time.sleep(2.0)
             return None
+        if item.kind == KIND_VIDEO:
+            item = self._prepare_video(item)
         if not self._render_item(item):
             return None
 
@@ -360,6 +416,8 @@ class Service:
                 self.history.commit_back()
             elif commit == "forward":
                 self.history.commit_forward()
+            elif commit == "jump":
+                self.history.commit_jump(item)
             else:
                 self.history.commit_new(item)
             self._current = item

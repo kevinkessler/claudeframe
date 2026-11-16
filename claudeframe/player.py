@@ -152,6 +152,7 @@ class Player:
         self._rendered_generation: Optional[int] = None
         self._mail_overlay_lock = threading.Lock()
         self._mail_overlay_generation = 0
+        self._output: Optional[tuple] = None  # current (vo, hwdec); set by start()
 
     def start(self) -> None:
         # Clean up any stale socket
@@ -189,6 +190,8 @@ class Player:
         ]
         if self.config.mpv_gpu_api:
             cmd.append("--gpu-api=" + self.config.mpv_gpu_api)
+        if self.config.mpv_wayland_display:
+            cmd.append("--gpu-context=wayland")
         if os.path.exists(self.config.caption_font):
             cmd.append("--osd-font=" + self.config.caption_font)
 
@@ -197,6 +200,8 @@ class Player:
             env["DISPLAY"] = self.config.mpv_display
         if self.config.mpv_xauthority:
             env["XAUTHORITY"] = self.config.mpv_xauthority
+        if self.config.mpv_wayland_display:
+            env["WAYLAND_DISPLAY"] = self.config.mpv_wayland_display
 
         mpv_log = open(self.config.mpv_log_path, "ab", buffering=0) if self.config.mpv_log_path else subprocess.DEVNULL
         log.info("mpv: starting (DISPLAY=%s): %s", env.get("DISPLAY"), " ".join(cmd))
@@ -210,7 +215,11 @@ class Player:
         )
         client = MpvClient(self.config.mpv_ipc_socket)
         client.connect()
+        # Switching vo on Wayland makes labwc send the window a close request,
+        # whose built-in binding would quit mpv after every zero-copy video.
+        client.command("keybind", "CLOSE_WIN", "ignore")
         self._client = client
+        self._output = (self.config.mpv_vo, self.config.mpv_hwdec)
         with self._render_lock:
             self._client_generation += 1
             client_generation = self._client_generation
@@ -283,12 +292,6 @@ class Player:
             f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2]"
         )
 
-    def _scale_filter(self) -> str:
-        """Plain downscale to display size for videos — keeps aspect, stays under
-        the 2048 GL texture limit, no per-frame blur cost."""
-        w, h = self.config.display_width, self.config.display_height
-        return f"lavfi=[scale={w}:{h}:force_original_aspect_ratio=decrease]"
-
     def wait_eof(self, timeout: float) -> bool:
         """Block until mpv emits end-file or timeout elapses. Clears the event."""
         if self._eof_event.wait(timeout):
@@ -308,13 +311,25 @@ class Player:
         except (TimeoutError, RuntimeError):
             return None
 
-    def show(self, item, loop: bool, caption: str = "") -> int:
-        """Request a media load and return its render-acknowledgement token."""
+    def show(self, item, loop: bool, caption: str = "", zero_copy: bool = False) -> int:
+        """Request a media load and return its render-acknowledgement token.
+
+        zero_copy: hardware-decode a video straight to a Wayland plane. Videos
+        get no filter otherwise either: mpv scales on the GPU, whereas a lavfi
+        scale to 4K costs 1.5-3 CPU cores per frame on a Pi 4.
+        """
         assert self._client is not None
         self._playing = False
         self._eof_event.clear()
         self._client.set_property("loop-file", "inf" if loop else "no")
-        vf = self._matte_filter() if item.kind == "image" else self._scale_filter()
+        output = ("dmabuf-wayland", "v4l2m2m") if zero_copy else (self.config.mpv_vo, self.config.mpv_hwdec)
+        if output != self._output:
+            # Switching vo reinitialises the window; only do it when needed so
+            # consecutive pictures don't flicker.
+            self._client.set_property("hwdec", output[1])
+            self._client.set_property("vo", output[0])
+            self._output = output
+        vf = self._matte_filter() if item.kind == "image" else ""
         self._client.command("vf", "set", vf)
         self._playing = False  # discard an outgoing-file filter restart
         # Changing vf can itself emit playback-restart for the current file.

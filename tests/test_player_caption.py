@@ -29,7 +29,7 @@ class FakeClient:
 
 
 def test_filter_restart_does_not_consume_next_caption():
-    cfg = SimpleNamespace(display_width=1920, display_height=1080, matte_blur_sigma=20)
+    cfg = SimpleNamespace(display_width=1920, display_height=1080, matte_blur_sigma=20, mpv_vo="gpu", mpv_hwdec="no")
     player = Player(cfg)
     client = FakeClient(player)
     player._client = client
@@ -52,7 +52,7 @@ def test_filter_restart_does_not_consume_next_caption():
 
 
 def test_render_ack_requires_file_loaded_then_first_playback_restart():
-    cfg = SimpleNamespace(display_width=1920, display_height=1080, matte_blur_sigma=20)
+    cfg = SimpleNamespace(display_width=1920, display_height=1080, matte_blur_sigma=20, mpv_vo="gpu", mpv_hwdec="no")
     player = Player(cfg)
     client = FakeClient(player)
     player._client = client
@@ -69,7 +69,7 @@ def test_render_ack_requires_file_loaded_then_first_playback_restart():
 
 
 def test_restart_cancels_timed_out_generation_before_late_event_and_next_load():
-    cfg = SimpleNamespace(display_width=1920, display_height=1080, matte_blur_sigma=20)
+    cfg = SimpleNamespace(display_width=1920, display_height=1080, matte_blur_sigma=20, mpv_vo="gpu", mpv_hwdec="no")
     player = Player(cfg)
     client = FakeClient(player)
     player._client = client
@@ -98,7 +98,7 @@ def test_restart_cancels_timed_out_generation_before_late_event_and_next_load():
 
 
 def test_stale_callback_from_replaced_client_cannot_acknowledge_current_load():
-    cfg = SimpleNamespace(display_width=1920, display_height=1080, matte_blur_sigma=20)
+    cfg = SimpleNamespace(display_width=1920, display_height=1080, matte_blur_sigma=20, mpv_vo="gpu", mpv_hwdec="no")
     player = Player(cfg)
     old_client = FakeClient(player)
     new_client = FakeClient(player)
@@ -135,7 +135,7 @@ def test_stale_callback_from_replaced_client_cannot_acknowledge_current_load():
 
 
 def test_mail_overlay_refresh_ignores_older_hide_generation():
-    cfg = SimpleNamespace(display_width=1920, display_height=1080, matte_blur_sigma=20)
+    cfg = SimpleNamespace(display_width=1920, display_height=1080, matte_blur_sigma=20, mpv_vo="gpu", mpv_hwdec="no")
     player = Player(cfg)
     client = FakeClient(player)
     player._client = client
@@ -152,3 +152,43 @@ def test_mail_overlay_refresh_ignores_older_hide_generation():
     player._hide_mail_icon(new_generation)
     removals = [cmd for cmd in client.async_commands if cmd[:3] == ("osd-overlay", 7719, "none")]
     assert len(removals) == 1
+
+
+class RecordingClient(FakeClient):
+    def __init__(self, player):
+        super().__init__(player)
+        self.props = []
+        self.filters = []
+
+    def set_property(self, name, value):
+        if name in ("vo", "hwdec"):
+            self.props.append((name, value))
+
+    def command(self, *args):
+        if args[:2] == ("vf", "set"):
+            self.filters.append(args[2])
+
+
+def test_output_switches_to_zero_copy_only_for_flagged_videos_and_back():
+    cfg = SimpleNamespace(display_width=3840, display_height=2160, matte_blur_sigma=20, mpv_vo="gpu", mpv_hwdec="no")
+    player = Player(cfg)
+    client = RecordingClient(player)
+    player._client = client
+    player._output = ("gpu", "no")  # as set by start()
+    image = SimpleNamespace(kind="image", path="/p/a.jpg")
+    video = SimpleNamespace(kind="video", path="/p/v.mp4")
+
+    player.show(image, loop=False)
+    player.show(image, loop=False)
+    assert client.props == []  # no vo reinit between pictures
+
+    player.show(video, loop=False, zero_copy=True)
+    assert client.props == [("hwdec", "v4l2m2m"), ("vo", "dmabuf-wayland")]
+
+    player.show(image, loop=False)
+    assert client.props[2:] == [("hwdec", "no"), ("vo", "gpu")]
+
+    player.show(video, loop=False, zero_copy=False)
+    assert len(client.props) == 4  # already on the GL output
+    # Pictures get the matte filter; videos never get a CPU filter.
+    assert [bool(f) for f in client.filters] == [True, True, False, True, False]

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 import threading
 import time
 from queue import Queue
@@ -6,7 +7,7 @@ from queue import Queue
 from claudeframe.config import Config
 from claudeframe.history import DisplayHistory
 from claudeframe.indexer import KIND_IMAGE, MediaItem
-from claudeframe.service import CONTROL_NEXT, Service
+from claudeframe.service import CONTROL_NEXT, CONTROL_SHOW, Service
 
 
 def _item(name: str) -> MediaItem:
@@ -28,7 +29,7 @@ class FakePlayer:
         self.restart_calls = 0
         self._generation = 0
 
-    def show(self, item, loop=False, caption=""):
+    def show(self, item, loop=False, caption="", zero_copy=False):
         self.shown.append(item)
         self._generation += 1
         return self._generation
@@ -46,6 +47,9 @@ class FakePlayer:
 
     def show_mail_icon(self, duration=2.0):
         self.overlay_calls += 1
+
+    def pause(self, paused):
+        self.paused = paused
 
 
 class FakeScheduler:
@@ -101,6 +105,8 @@ def _service(*, scheduler=(), rendered=True, slide_seconds=0.1) -> Service:
     svc.buttons = None
     svc._current = None
     svc._current_ts = 0.0
+    svc._selected = None
+    svc._video_zero_copy = {}
     svc._paused = threading.Event()
     svc._advance = threading.Event()
     svc._controls = Queue(maxsize=32)
@@ -289,3 +295,140 @@ def test_ban_removes_all_matching_paths_from_committed_history():
 
     assert svc._show_navigation(control) is c
     assert svc.history.back_candidate() is a
+
+
+def test_picked_item_shows_immediately_and_back_returns_to_prior_slide():
+    a, b, pick = _item("a"), _item("b"), _item("pick")
+    svc = _service(scheduler=[_item("new")])
+    _commit(svc, a, b)
+
+    svc.request_show(pick)
+    control = svc._dwell(b)
+    assert control == CONTROL_SHOW
+    assert svc._show_navigation(control) is pick
+    assert svc.history.current() is pick
+    assert svc.history.back_candidate() is b
+    assert svc.scheduler.calls == 0
+
+
+def test_pick_after_back_discards_forward_history():
+    a, b, c, pick = _item("a"), _item("b"), _item("c"), _item("pick")
+    svc = _service(scheduler=[_item("new")])
+    _commit(svc, a, b, c)
+    svc.history.commit_back()
+    svc._current = b
+
+    svc.request_show(pick)
+    assert svc._show_navigation(svc._dwell(b)) is pick
+    assert svc.history.items() == [a, b, pick]
+
+    # After the pick, the slideshow carries on with the scheduler.
+    assert svc._show_navigation(CONTROL_NEXT).display_name == "new"
+
+
+def test_latest_of_several_picks_wins_and_extra_show_controls_are_ignored():
+    a, first, second = _item("a"), _item("first"), _item("second")
+    svc = _service()
+    _commit(svc, a)
+
+    svc.request_show(first)
+    svc.request_show(second)
+    assert svc._show_navigation(svc._dwell(a)) is second
+    # The second queued SHOW has nothing left to display; dwell times out normally.
+    assert svc._dwell(second) == CONTROL_NEXT
+    assert svc.player.shown == [second]
+
+
+def test_pick_while_paused_resumes_slideshow():
+    a, pick = _item("a"), _item("pick")
+    svc = _service()
+    _commit(svc, a)
+    svc.pause()
+
+    svc.request_show(pick)
+
+    assert not svc._paused.is_set()
+    assert svc.player.paused is False
+    assert svc._show_navigation(svc._dwell(a)) is pick
+
+
+def _video(name, path=None):
+    return MediaItem(path=path or f"/fake/{name}.avi", kind="video", folder="fake",
+                     display_name=name, description=None, mtime=0.0)
+
+
+class ConvertingIndexer(FakeIndexer):
+    def __init__(self):
+        super().__init__()
+        self.removed, self.added = [], []
+
+    def remove_path(self, path):
+        self.removed.append(path)
+
+    def add_path(self, path):
+        self.added.append(path)
+        return _video("clip", path)
+
+
+def test_undecodable_video_is_converted_once_then_played_zero_copy(monkeypatch):
+    from claudeframe import service as service_mod
+    from claudeframe.transcode import VideoInfo
+
+    old = _video("clip")
+    svc = _service(scheduler=[old])
+    svc.config.mpv_wayland_display = "wayland-0"
+    svc.config.transcode_videos = True
+    svc.config.deleted_dir = "/backup"
+    svc.indexer = ConvertingIndexer()
+    infos = {"/fake/clip.avi": VideoInfo("mjpeg", 640, 480, "yuvj422p", 5.0),
+             "/fake/clip.mp4": VideoInfo("h264", 640, 480, "yuv420p", 5.0)}
+    converted = []
+    monkeypatch.setattr(service_mod.transcode, "probe", lambda p: infos[p])
+    monkeypatch.setattr(service_mod.transcode, "convert",
+                        lambda p, info, pic, bak: converted.append((p, bak)) or "/fake/clip.mp4")
+
+    shown = svc._show_navigation(CONTROL_NEXT)
+
+    assert shown.path == "/fake/clip.mp4"
+    assert converted == [("/fake/clip.avi", "/backup")]
+    assert svc.indexer.removed == ["/fake/clip.avi"] and svc.indexer.added == ["/fake/clip.mp4"]
+    assert svc.history.current().path == "/fake/clip.mp4"
+    assert svc._video_zero_copy == {"/fake/clip.mp4": True}
+
+    assert svc._prepare_video(shown) is shown  # cached: no second probe/convert
+    assert len(converted) == 1
+
+
+def test_failed_conversion_plays_original_on_gl_path_and_is_not_retried(monkeypatch):
+    from claudeframe import service as service_mod
+    from claudeframe.transcode import VideoInfo
+
+    old = _video("clip")
+    svc = _service(scheduler=[old])
+    svc.config.mpv_wayland_display = "wayland-0"
+    svc.config.transcode_videos = True
+    svc.config.deleted_dir = "/backup"
+    calls = []
+    monkeypatch.setattr(service_mod.transcode, "probe", lambda p: VideoInfo("mjpeg", 640, 480, "yuvj422p", 5.0))
+
+    def boom(*a):
+        calls.append(a)
+        raise RuntimeError("ffmpeg failed")
+    monkeypatch.setattr(service_mod.transcode, "convert", boom)
+
+    assert svc._show_navigation(CONTROL_NEXT) is old
+    assert svc._video_zero_copy == {old.path: False}
+    svc._prepare_video(old)
+    assert len(calls) == 1
+
+
+def test_transcoding_disabled_never_converts(monkeypatch):
+    from claudeframe import service as service_mod
+    from claudeframe.transcode import VideoInfo
+
+    old = _video("clip")
+    svc = _service(scheduler=[old])
+    monkeypatch.setattr(service_mod.transcode, "probe", lambda p: VideoInfo("mjpeg", 640, 480, "yuvj422p", 5.0))
+    monkeypatch.setattr(service_mod.transcode, "convert", lambda *a: pytest.fail("must not convert"))
+
+    assert svc._show_navigation(CONTROL_NEXT) is old
