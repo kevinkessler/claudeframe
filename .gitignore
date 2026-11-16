@@ -1,4 +1,6 @@
 .claude/
+.pi-subagents/
+config/claudeframe.yaml
 __pycache__/
 *.py[cod]
 *.egg-info/

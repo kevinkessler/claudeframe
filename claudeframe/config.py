@@ -20,6 +20,8 @@ class Config:
     db_path: str = "/home/pi/claudeframe/index.sqlite"
 
     slide_seconds: float = 20.0
+    # Maximum wait for mpv to acknowledge that a requested file rendered.
+    render_timeout: float = 20.0
     # Skip a video that makes no playback progress (time-pos not advancing) for
     # this many seconds — covers a file that won't open or stalls mid-stream on
     # a slow share, which would otherwise never reach EOF and hang the slideshow.
@@ -50,9 +52,20 @@ class Config:
     # mpv renders into the X session rather than talking to /dev/dri directly.
     mpv_display: str = ":0"
     mpv_xauthority: str = "/home/pi/.Xauthority"
+    # Wayland socket name (e.g. "wayland-0"). When set, mpv runs as a native
+    # Wayland client and hardware-decodable videos play through zero-copy
+    # dmabuf-wayland output; the 4K GL path can't keep up with video rates.
+    mpv_wayland_display: str = ""
+    # Re-encode videos the hardware decoder can't play (non-H.264, or above
+    # 1080p) to H.264 the first time they are shown. The new .mp4 is written
+    # beside the original, which moves to deleted_dir. Requires deleted_dir.
+    transcode_videos: bool = False
 
     web_host: str = "0.0.0.0"
     web_port: int = 8080
+
+    # Physical GPIO controls are frame-specific and opt in explicitly.
+    buttons_enabled: bool = False
 
     image_exts: List[str] = field(default_factory=lambda: sorted(IMAGE_EXTS))
     video_exts: List[str] = field(default_factory=lambda: sorted(VIDEO_EXTS))
